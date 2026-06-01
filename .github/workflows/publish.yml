@@ -23,6 +23,7 @@ jobs:
           echo "Found: $FILE"
 
       - name: Publish to WordPress
+        id: publish
         if: steps.find.outputs.file != ''
         env:
           WP_URL: ${{ secrets.WP_URL }}
@@ -36,11 +37,7 @@ jobs:
           with open(os.environ['POST_FILE']) as f:
               post = json.load(f)
 
-          user = os.environ['WP_USER']
-          pwd  = os.environ['WP_APP_PASSWORD']
-          url  = os.environ['WP_URL']
-
-          creds = base64.b64encode(f'{user}:{pwd}'.encode()).decode()
+          creds = base64.b64encode(f"{os.environ['WP_USER']}:{os.environ['WP_APP_PASSWORD']}".encode()).decode()
           data = json.dumps({
               'title':   post['title'],
               'content': post['content'],
@@ -49,7 +46,7 @@ jobs:
           }).encode('utf-8')
 
           req = urllib.request.Request(
-              f'{url}/wp-json/wp/v2/posts',
+              f"{os.environ['WP_URL']}/wp-json/wp/v2/posts",
               data=data,
               headers={'Authorization': f'Basic {creds}', 'Content-Type': 'application/json'},
               method='POST'
@@ -58,7 +55,53 @@ jobs:
               with urllib.request.urlopen(req) as r:
                   res = json.loads(r.read())
                   print(f"Published: {res['link']}")
+                  # Write URL for next steps
+                  with open('/tmp/post_url.txt', 'w') as f:
+                      f.write(res['link'])
           except urllib.error.HTTPError as e:
               print(f"Error {e.code}: {e.read().decode()[:300]}")
               sys.exit(1)
           EOF
+
+      - name: Ping Google sitemap
+        if: steps.find.outputs.file != ''
+        run: |
+          curl -s "https://www.google.com/ping?sitemap=https://www.tvaresearch.com/sitemap_index.xml" -o /dev/null -w "Google sitemap ping: %{http_code}\n"
+          curl -s "https://www.google.com/ping?sitemap=https://www.tvaresearch.com/sitemap.xml" -o /dev/null -w "Google sitemap ping 2: %{http_code}\n"
+
+      - name: Ping Bing sitemap
+        if: steps.find.outputs.file != ''
+        run: |
+          curl -s "https://www.bing.com/ping?sitemap=https://www.tvaresearch.com/sitemap_index.xml" -o /dev/null -w "Bing sitemap ping: %{http_code}\n"
+
+      - name: Submit to IndexNow
+        if: steps.find.outputs.file != ''
+        run: |
+          POST_URL=$(cat /tmp/post_url.txt 2>/dev/null || echo "")
+          if [ -n "$POST_URL" ]; then
+            python3 - << EOF
+          import urllib.request, json
+
+          url = "$POST_URL"
+          key = "bb2f3e7cc9ec4c88a408317f5cc164fd"
+
+          payload = json.dumps({
+              "host": "www.tvaresearch.com",
+              "key": key,
+              "keyLocation": f"https://www.tvaresearch.com/{key}/",
+              "urlList": [url]
+          }).encode()
+
+          for endpoint in [
+              "https://api.indexnow.org/indexnow",
+              "https://www.bing.com/indexnow"
+          ]:
+              try:
+                  req = urllib.request.Request(endpoint, data=payload,
+                      headers={"Content-Type": "application/json; charset=utf-8"}, method="POST")
+                  with urllib.request.urlopen(req) as r:
+                      print(f"IndexNow {endpoint}: {r.status}")
+              except Exception as e:
+                  print(f"IndexNow {endpoint}: {e}")
+          EOF
+          fi
