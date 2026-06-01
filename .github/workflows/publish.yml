@@ -1,0 +1,64 @@
+name: Publish Blog Post to WordPress
+
+on:
+  push:
+    paths:
+      - 'posts/*.json'
+    branches:
+      - main
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find new post file
+        id: find
+        run: |
+          FILE=$(git diff --name-only HEAD~1 HEAD -- 'posts/*.json' | head -1)
+          echo "file=$FILE" >> $GITHUB_OUTPUT
+          echo "Found: $FILE"
+
+      - name: Publish to WordPress
+        if: steps.find.outputs.file != ''
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          POST_FILE: ${{ steps.find.outputs.file }}
+        run: |
+          python3 - << 'EOF'
+          import json, urllib.request, base64, os, sys
+
+          with open(os.environ['POST_FILE']) as f:
+              post = json.load(f)
+
+          user = os.environ['WP_USER']
+          pwd  = os.environ['WP_APP_PASSWORD']
+          url  = os.environ['WP_URL']
+
+          creds = base64.b64encode(f'{user}:{pwd}'.encode()).decode()
+          data = json.dumps({
+              'title':   post['title'],
+              'content': post['content'],
+              'excerpt': post['excerpt'],
+              'status':  'publish'
+          }).encode('utf-8')
+
+          req = urllib.request.Request(
+              f'{url}/wp-json/wp/v2/posts',
+              data=data,
+              headers={'Authorization': f'Basic {creds}', 'Content-Type': 'application/json'},
+              method='POST'
+          )
+          try:
+              with urllib.request.urlopen(req) as r:
+                  res = json.loads(r.read())
+                  print(f"Published: {res['link']}")
+          except urllib.error.HTTPError as e:
+              print(f"Error {e.code}: {e.read().decode()[:300]}")
+              sys.exit(1)
+          EOF
